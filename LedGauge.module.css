@@ -1,0 +1,35 @@
+/* components/LedGauge.module.css */
+.ledContainer {
+    display: flex;
+    gap: 5px;
+  }
+  
+  .led {
+    width: 20px;
+    height: 20px;
+    position: relative;
+    border-radius: 50%;
+    background-color: lightgray;
+    overflow: hidden;
+  }
+  
+  .fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 100%;
+  }
+  
+  .red .fill {
+    background-color: red;
+  }
+  
+  .amber .fill {
+    background-color: orange;
+  }
+  
+  .green .fill {
+    background-color: green;
+  }
+  
