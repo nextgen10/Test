@@ -426,6 +426,7 @@ If lower → response is flagged as incorrect.
 
 -------------------------------
 
+```
 """
 AI Response Evaluator - production-ready framework
 Filename: ai_response_evaluator.py
@@ -749,9 +750,4 @@ def main():
 if __name__ == '__main__':
     main()
 
-
-
-
-
-No file chosenNo file chosen
-ChatGPT can make mistakes. Check important info.
+```
