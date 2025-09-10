@@ -424,6 +424,334 @@ If lower → response is flagged as incorrect.
 
 
 
+-------------------------------
+
+"""
+AI Response Evaluator - production-ready framework
+Filename: ai_response_evaluator.py
+
+Features:
+- Extract text from single/multiple PDFs (pdfplumber)
+- Load ground truth annotations from CSV/JSON (query_id, expected, expected_type, tolerance (for numeric), lang)
+- Evaluate AI outputs (single-run or multiple-run for consistency): supports exact match, numeric tolerance, and semantic similarity (sentence-transformers)
+- Compute Accuracy, Consistency, and composite Response Quality Score (RQS)
+- Command-line interface for batch evaluation
+- Configurable weights and thresholds
+
+Dependencies:
+- pip install pdfplumber pandas sentence-transformers scikit-learn numpy tqdm python-dotenv
+
+Usage example (CLI):
+python ai_response_evaluator.py --ground_truth ground_truth.csv --ai_outputs ai_outputs.csv --pdfs docs/*.pdf --output results.json
+
+Ground truth CSV format (required columns):
+- query_id: unique id for the query
+- expected: the expected answer (string or numeric)
+- expected_type: one of ['text','number']
+- tolerance: optional numeric tolerance (applies for number types; default 1e-6)
+- lang: optional language code for semantic model selection (default 'en')
+
+AI outputs CSV format (required columns):
+- query_id
+- run_id: identifier for the run (e.g. 1..N). If only single run, set run_id=1 for all
+- output: the AI produced answer as text
+
+Notes:
+- For semantic similarity we use sentence-transformers. For numeric comparisons we parse numbers robustly.
+- The PDF text extraction is used if you want to auto-generate ground truth or verify information in PDFs; this framework assumes ground truths are provided separately.
+
+"""
+
+import argparse
+import csv
+import json
+import math
+import os
+import re
+from dataclasses import dataclass, field
+from glob import glob
+from typing import Dict, List, Optional, Tuple, Any
+
+import numpy as np
+import pandas as pd
+import pdfplumber
+from sentence_transformers import SentenceTransformer, util
+from sklearn.metrics import accuracy_score
+from tqdm import tqdm
+
+
+# --------------------------- Utilities ---------------------------
+NUMBER_RE = re.compile(r"[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?")
+
+
+def robust_parse_number(s: str) -> Optional[float]:
+    if s is None:
+        return None
+    if isinstance(s, (int, float)):
+        return float(s)
+    # remove currency symbols and commas
+    s2 = s.replace(',', '')
+    m = NUMBER_RE.search(s2)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except Exception:
+        return None
+
+
+# --------------------------- Data Classes ---------------------------
+@dataclass
+class GroundTruthRecord:
+    query_id: str
+    expected: str
+    expected_type: str = 'text'  # 'text' or 'number'
+    tolerance: float = 1e-6
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AIOutputRecord:
+    query_id: str
+    run_id: str
+    output: str
+
+
+# --------------------------- PDF Extraction ---------------------------
+class PDFExtractor:
+    @staticmethod
+    def extract_text_from_pdf(path: str) -> str:
+        all_text = []
+        with pdfplumber.open(path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    all_text.append(text)
+        return "\n".join(all_text)
+
+    @staticmethod
+    def extract_text_from_pdfs(paths: List[str]) -> Dict[str, str]:
+        result = {}
+        for p in paths:
+            result[p] = PDFExtractor.extract_text_from_pdf(p)
+        return result
+
+
+# --------------------------- Loader Functions ---------------------------
+class GroundTruthLoader:
+    @staticmethod
+    def from_csv(path: str) -> Dict[str, GroundTruthRecord]:
+        df = pd.read_csv(path, dtype=str).fillna('')
+        records = {}
+        for _, row in df.iterrows():
+            qid = str(row['query_id'])
+            expected = str(row['expected'])
+            expected_type = str(row.get('expected_type', 'text'))
+            tol = row.get('tolerance', '')
+            try:
+                tolerance = float(tol) if tol != '' else 1e-6
+            except Exception:
+                tolerance = 1e-6
+            meta = {}
+            # include other columns as metadata
+            for c in df.columns:
+                if c not in ['query_id', 'expected', 'expected_type', 'tolerance']:
+                    meta[c] = row[c]
+            records[qid] = GroundTruthRecord(qid, expected, expected_type, tolerance, meta)
+        return records
+
+
+class AIOutputsLoader:
+    @staticmethod
+    def from_csv(path: str) -> List[AIOutputRecord]:
+        df = pd.read_csv(path, dtype=str).fillna('')
+        records = []
+        for _, row in df.iterrows():
+            records.append(AIOutputRecord(str(row['query_id']), str(row.get('run_id', '1')), str(row['output'])))
+        return records
+
+
+# --------------------------- Evaluator ---------------------------
+class Evaluator:
+    def __init__(self, model_name: str = 'sentence-transformers/all-MiniLM-L6-v2', device: str = None):
+        self.model_name = model_name
+        self.model = SentenceTransformer(model_name, device=device)
+
+    # Exact match (case-insensitive, trimmed)
+    @staticmethod
+    def exact_match(a: str, b: str) -> bool:
+        if a is None or b is None:
+            return False
+        return a.strip().lower() == b.strip().lower()
+
+    # Numeric comparison with tolerance
+    @staticmethod
+    def numeric_match(a: str, b: str, tol: float = 1e-6) -> bool:
+        na = robust_parse_number(a)
+        nb = robust_parse_number(b)
+        if na is None or nb is None:
+            return False
+        return math.isclose(na, nb, rel_tol=tol, abs_tol=tol)
+
+    # Semantic similarity using embeddings
+    def semantic_similarity(self, a: str, b: str) -> float:
+        if (not a) or (not b):
+            return 0.0
+        emb = self.model.encode([a, b], convert_to_tensor=True)
+        score = util.pytorch_cos_sim(emb[0], emb[1]).item()
+        return float(score)  # in [-1,1]
+
+    # Evaluate single-run: returns dict of scores for each query
+    def evaluate_once(self, ground_truths: Dict[str, GroundTruthRecord], ai_outputs: List[AIOutputRecord],
+                      semantic_threshold: float = 0.7) -> Dict[str, Dict[str, Any]]:
+        # Group outputs by query_id, pick run_id '1' if multiple runs present
+        chosen = {}
+        for out in ai_outputs:
+            if out.query_id not in chosen:
+                chosen[out.query_id] = out
+        results = {}
+        for qid, gt in ground_truths.items():
+            out = chosen.get(qid)
+            if out is None:
+                results[qid] = {
+                    'found': False,
+                    'match_type': None,
+                    'accuracy': 0,
+                    'semantic_score': 0.0,
+                    'expected': gt.expected,
+                    'output': None
+                }
+                continue
+            output = out.output
+            if gt.expected_type == 'number':
+                nm = self.numeric_match(output, gt.expected, gt.tolerance)
+                results[qid] = {
+                    'found': True,
+                    'match_type': 'numeric',
+                    'accuracy': 1 if nm else 0,
+                    'semantic_score': None,
+                    'expected': gt.expected,
+                    'output': output
+                }
+            else:
+                em = self.exact_match(output, gt.expected)
+                sem = self.semantic_similarity(output, gt.expected)
+                acc = 1 if (em or sem >= semantic_threshold) else 0
+                results[qid] = {
+                    'found': True,
+                    'match_type': 'text',
+                    'accuracy': acc,
+                    'exact_match': bool(em),
+                    'semantic_score': sem,
+                    'expected': gt.expected,
+                    'output': output
+                }
+        return results
+
+    # Consistency: given multiple runs per query_id, compute average pairwise similarity of outputs
+    def evaluate_consistency(self, ai_outputs: List[AIOutputRecord]) -> Dict[str, float]:
+        # group by query_id
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for out in ai_outputs:
+            groups[out.query_id].append(out.output)
+        consistency_scores = {}
+        for qid, outputs in groups.items():
+            n = len(outputs)
+            if n <= 1:
+                consistency_scores[qid] = 1.0  # single output considered fully consistent
+                continue
+            # compute pairwise semantic similarities
+            emb = self.model.encode(outputs, convert_to_tensor=True)
+            sims = util.pytorch_cos_sim(emb, emb).cpu().numpy()
+            # only consider upper triangle without diagonal
+            pairs = []
+            for i in range(n):
+                for j in range(i + 1, n):
+                    pairs.append(sims[i, j])
+            if not pairs:
+                consistency = 1.0
+            else:
+                consistency = float(np.mean(pairs))  # in [-1,1]
+            # normalize from [-1,1] to [0,1]
+            consistency_scores[qid] = (consistency + 1) / 2
+        return consistency_scores
+
+    # Compute overall metrics
+    def aggregate_scores(self, single_eval: Dict[str, Dict[str, Any]], consistency_scores: Optional[Dict[str, float]] = None,
+                         alpha: float = 0.7, beta: float = 0.3) -> Dict[str, Any]:
+        qids = list(single_eval.keys())
+        accs = [single_eval[q]['accuracy'] for q in qids]
+        accuracy = float(np.mean(accs)) if accs else 0.0
+        if consistency_scores is None:
+            consistency = 1.0
+        else:
+            cs = [consistency_scores.get(q, 1.0) for q in qids]
+            consistency = float(np.mean(cs))
+        rqs = alpha * accuracy + beta * consistency
+        return {
+            'accuracy': accuracy,
+            'consistency': consistency,
+            'rqs': rqs,
+            'alpha': alpha,
+            'beta': beta,
+            'n_queries': len(qids)
+        }
+
+
+# --------------------------- CLI ---------------------------
+def parse_args():
+    p = argparse.ArgumentParser(description='AI Response Evaluation Framework')
+    p.add_argument('--ground_truth', required=True, help='CSV file with ground truth')
+    p.add_argument('--ai_outputs', required=True, help='CSV file with AI outputs')
+    p.add_argument('--pdfs', nargs='*', help='Optional PDF(s) to extract text from')
+    p.add_argument('--model', default='sentence-transformers/all-MiniLM-L6-v2', help='SentenceTransformer model')
+    p.add_argument('--semantic_threshold', type=float, default=0.72, help='Threshold for semantic match')
+    p.add_argument('--alpha', type=float, default=0.7, help='Weight for accuracy in RQS')
+    p.add_argument('--beta', type=float, default=0.3, help='Weight for consistency in RQS')
+    p.add_argument('--output', default='results.json', help='Path to write results JSON')
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    gt = GroundTruthLoader.from_csv(args.ground_truth)
+    ai_outs = AIOutputsLoader.from_csv(args.ai_outputs)
+
+    if args.pdfs:
+        pdf_paths = []
+        for p in args.pdfs:
+            pdf_paths.extend(glob(p))
+        pdf_texts = PDFExtractor.extract_text_from_pdfs(pdf_paths)
+        # optionally write extracted pdf text for human verification
+        for k, v in pdf_texts.items():
+            outp = os.path.splitext(os.path.basename(k))[0] + '.extracted.txt'
+            with open(outp, 'w', encoding='utf-8') as f:
+                f.write(v)
+            print(f'Extracted text written to {outp}')
+
+    evaluator = Evaluator(model_name=args.model)
+    single_eval = evaluator.evaluate_once(gt, ai_outs, semantic_threshold=args.semantic_threshold)
+    consistency = evaluator.evaluate_consistency(ai_outs)
+    agg = evaluator.aggregate_scores(single_eval, consistency_scores=consistency, alpha=args.alpha, beta=args.beta)
+
+    results = {
+        'per_query': single_eval,
+        'consistency_per_query': consistency,
+        'aggregate': agg
+    }
+
+    with open(args.output, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    print(f'Results written to {args.output}')
+
+
+if __name__ == '__main__':
+    main()
+
+
+
+
 
 No file chosenNo file chosen
 ChatGPT can make mistakes. Check important info.
