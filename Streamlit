@@ -1,15 +1,283 @@
-import os
-import subprocess
-import sys
+import streamlit as st
+import configparser
+import pandas as pd
+import time
+import requests
+from pathlib import Path
+from streamlit_lottie import st_lottie
+from streamlit_option_menu import option_menu
 
-def resource_path(relative_path):
-    """Get absolute path to resource, works for dev and for PyInstaller."""
+# ---------------- Page Setup ----------------
+st.set_page_config(
+    page_title="Agentic Test Case Generator",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ---------------- Custom CSS ----------------
+st.markdown("""
+<style>
+body {
+    background-color: #0f172a;
+    color: #e2e8f0;
+    font-family: 'Inter', sans-serif;
+}
+h1, h2, h3, h4 { color: #f8fafc; }
+.stButton>button {
+    background-color: #2563eb;
+    color: white;
+    border-radius: 8px;
+    font-weight: 600;
+    padding: 0.6em 1.2em;
+}
+.stButton>button:hover { background-color: #1d4ed8; }
+.card {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 14px;
+    padding: 16px;
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.4);
+}
+.metric-card {
+    background: rgba(255, 255, 255, 0.07);
+    border-radius: 10px;
+    padding: 10px;
+    text-align: center;
+}
+/* Sticky headers */
+.sticky-header {
+    position: sticky;
+    top: 0;
+    background-color: #0f172a;
+    z-index: 999;
+    padding: 10px 0;
+    border-bottom: 2px solid #2563eb;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------- Utility Functions ----------------
+CONFIG_PATH = Path("config.ini")
+
+def load_config():
+    config = configparser.ConfigParser()
+    if CONFIG_PATH.exists():
+        config.read(CONFIG_PATH)
+    else:
+        config['DEFAULT'] = {
+            'chatbot_token': '',
+            'git_base_url': 'https://gitlab.com',
+            'squash_base_url': 'https://squash.example.com'
+        }
+    return config
+
+def save_config(data: dict):
+    config = configparser.ConfigParser()
+    config['DEFAULT'] = data
+    with open(CONFIG_PATH, 'w') as f:
+        config.write(f)
+
+def simulate_agentic_generation(source_type, source_value, include_positive, include_negative):
+    rows = []
+    base_id = 1000
+    for i in range(1, 11):
+        scenario = f"Scenario from {source_type} - {i}"
+        if source_value:
+            scenario += f" ({source_value})"
+        if include_positive:
+            rows.append({"id": base_id+i, "type": "positive", "title": f"Positive {i}", "scenario": scenario, "priority": "P2"})
+        if include_negative:
+            rows.append({"id": base_id+i+100, "type": "negative", "title": f"Negative {i}", "scenario": scenario, "priority": "P1"})
+    return pd.DataFrame(rows)
+
+def get_lottie(url: str):
     try:
-        base_path = sys._MEIPASS  # PyInstaller temp folder
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+        r = requests.get(url)
+        if r.status_code == 200:
+            return r.json()
+    except:
+        return None
+    return None
 
-if __name__ == "__main__":
-    app_path = resource_path("app.py")
-    subprocess.run(["streamlit", "run", app_path, "--server.port=8501", "--server.headless=true"])
+# ---------------- Sidebar Navigation ----------------
+with st.sidebar:
+    st.markdown("<h2 style='text-align:center;'>Agentic AI - QA Studio</h2>", unsafe_allow_html=True)
+
+    selected = option_menu(
+        menu_title=None,
+        options=["Home", "Test Design", "Configurations"],
+        icons=["house", "cpu", "gear"],
+        menu_icon="cast",
+        default_index=0,
+        styles={
+            "container": {"padding": "0!important", "background-color": "var(--sidebar-background-color)"},
+            "icon": {"color": "var(--text-color-secondary)", "font-size": "16px"},
+            "nav-link": {
+                "color": "var(--text-color-primary)",
+                "font-size": "14px",
+                "font-weight": "bold",
+                "text-align": "left",
+                "margin": "5px",
+                "--hover-color": "#b47878"  # Replace with your desired hover color
+            },
+            "nav-link-selected": {"background-color": "#ba3232"},  # Matches hover for selected
+        },
+    )
+
+
+
+# ---------------- Page: Home ----------------
+if selected == "Home":
+    st.markdown("## Test Case Generator")
+    #st.caption("### AI-powered Test Case Generation")
+    st.markdown("---")
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.markdown(
+            """
+            <div class='card'>
+            <h3>About Agentic AI</h3>
+            <p>
+            This application uses <b>Agentic AI</b> to autonomously analyze requirements
+            from <b>Word documents</b>, <b>GitLab issues</b>, or <b>Squash TM</b> and 
+            generate structured positive and negative test cases with minimal human input.
+            </p>
+            <ul>
+              <li>Fully configurable integration endpoints</li>
+              <li>Intelligent context understanding</li>
+            </ul>
+            <br>
+            <br>
+            <ul>
+                <h3>🚀 Quick Start</h3>
+                <p>1️⃣ Go to <b>Configuration</b> and set API tokens and URLs.</p>
+                <p>2️⃣ Navigate to <b>Test Design</b> and upload or enter IDs.</p>
+                <p>3️⃣ Select test case types and click <b>Generate Test Cases</b>.</p>
+                <p>4️⃣ Review, refine, and export results.</p>
+            <ul>
+            """, unsafe_allow_html=True)
+       
+
+        
+
+
+    with col2:
+        st.image("static/ai.gif", use_container_width=True)
+
+
+
+# ---------------- Page: Test Design ----------------
+elif selected == "Test Design":
+   # Smaller heading with less margin
+    st.markdown('<h2 style="margin-top:10px; margin-bottom:5px;">🧠 Test Design Studio</h2>', unsafe_allow_html=True)
+
+    # Smaller divider
+    st.markdown('<hr style="margin-top:5px; margin-bottom:10px;">', unsafe_allow_html=True)
+
+    src_col, opts_col = st.columns([2, 1])
+
+# CSS to match Input Type header and option sizes
+    st.markdown("""
+    <style>
+    /* Radio header (Input Type) */
+    div.stRadio label[data-testid="stWidgetLabel"] div[data-testid="stMarkdownContainer"] p {
+        font-size: 16px !important;
+        font-weight: 600 !important;
+        margin-bottom: 8px !important;
+    }
+
+    /* Radio options (Word, Gitlab, Squash) */
+    div[role="radiogroup"] div[data-testid="stMarkdownContainer"] p {
+        font-size: 14px !important;
+        font-weight: 500 !important;
+        margin: 0 !important;
+        line-height: 1.3 !important;
+    }
+
+    /* Checkbox header (Test Case Type) */
+    div.stMarkdown div[data-testid="stMarkdownContainer"] p {
+        font-size: 16px !important;
+        font-weight: 600 !important;
+        margin-bottom: 8px !important;
+    }
+
+    /* Checkbox option labels (Positive, Negative) */
+    label[data-baseweb="checkbox"] div[data-testid="stMarkdownContainer"] p {
+        font-size: 14px !important;   /* match radio option size */
+        font-weight: 500 !important;
+        margin: 0 !important;
+        line-height: 1.3 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    with src_col:
+    # Radio button
+        source_type = st.radio("Input Type", ["Word", "Gitlab", "Squash"], horizontal=True)        
+        source_value = None
+        if source_type == "Word":
+            uploaded = st.file_uploader("Upload Word Document (.docx)", type=['docx'])
+            if uploaded:
+                st.session_state['uploaded_word'] = uploaded.read()
+                source_value = uploaded.name
+                st.success(f"Uploaded: {uploaded.name}")
+        else:
+            source_value = st.text_input(f"Enter {source_type} ID or URL")
+
+    with opts_col:
+        # Test Case Type header
+        st.markdown("Test Case Type", unsafe_allow_html=True)
+        
+        # Horizontal layout using two columns
+        pos_col, neg_col = st.columns(2)
+        with pos_col:
+            include_positive = st.checkbox("Positive", value=True)
+        with neg_col:
+            include_negative = st.checkbox("Negative", value=True)
+
+
+
+    
+    if st.button("🚀 Generate Test Cases"):
+        if source_type == "Word" and 'uploaded_word' not in st.session_state:
+            st.error("Please upload a Word document first.")
+        elif not include_positive and not include_negative:
+            st.error("Select at least one test case type.")
+        else:
+            with st.spinner("Generating test cases using Agentic AI..."):
+                time.sleep(1.5)
+                df = simulate_agentic_generation(source_type, source_value, include_positive, include_negative)
+                st.success(f"✅ Generated {len(df)} test cases")
+                st.dataframe(df, use_container_width=True)
+                st.download_button("📥 Download CSV", df.to_csv(index=False), "testcases.csv", "text/csv")
+
+# ---------------- Page: Config ----------------
+elif selected == "Configurations":
+    st.markdown("## ⚙️ Configurations", unsafe_allow_html=True)
+    st.markdown("---")
+    config = load_config()
+    defaults = config['DEFAULT']
+
+    col1, col2 = st.columns(2)
+    with col1:
+        chatbot_token = st.text_input("Chatbot Token", value=defaults.get('chatbot_token', ''), type='password')
+        git_base_url = st.text_input("GitLab Base URL", value=defaults.get('git_base_url', 'https://gitlab.com'))
+    with col2:
+        squash_base_url = st.text_input("Squash Base URL", value=defaults.get('squash_base_url', 'https://squash.example.com'))
+        default_project = st.text_input("Default Project", value=defaults.get('default_project', ''))
+
+    if st.button("💾Save Configuration"):
+        save_config({
+            'chatbot_token': chatbot_token,
+            'git_base_url': git_base_url,
+            'squash_base_url': squash_base_url,
+            'default_project': default_project
+        })
+        st.success("Configuration saved successfully ✅")
+
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, 'r') as f:
+            st.code(f.read())
+    else:
+        st.info("No configuration file found yet.")
+st.markdown("---")
+st.markdown("<div style='text-align:center; color:#94a3b8; margin-top:50px;'>Agentic AI</div>", unsafe_allow_html=True)
